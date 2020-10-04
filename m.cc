@@ -2,58 +2,11 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <cstring>
 
-int Panic(const char* msg, int num) {
-  fprintf(stderr, "\n****** PANIC: ``%s'' (%d)\n", msg, num);
-  assert(0);
-  return 0;
-}
-typedef unsigned char byte;
+#include "defs.h"
 
-#define IS_DIGIT(C) ('0' <= (C) && (C) <= '9')
-#define DIGIT_VALUE(C) ((C) - '0')
-
-#define FIRST_CC 120
-#define FIRST_BI 128
-
-// Numbered Opcodes
-byte NumberedChars[] = {
-  'g', // Get global var
-  'p', // Put global var
-  'd', // Define user function
-  'c', // Call user function
-  'n', // literal Number
-  'm', // More digit for literal number
-};
-
-enum NumberedEnum { nGet, nPut, nDef, nCall, nNum, nMore, };
-
-enum BigraphEnum {
-  // The bigraph opcodes on this first line have a 1-byte operand:
-  bWh = FIRST_BI, bRe, bIf, bEl,
-  // The rest do not.
-#define FIRST_BI_NO_OPERAND bBe // The first bigraph opcode with no operand.
-  bBe, bTh,
-  bPl, bPn,
-  bSt,
-};
-
-byte Bigraphs[] = {
-  'w', 'h', // WHile
-  'r', 'e', // REpeat
-  'i', 'f', // IF
-  'e', 'l', // ELse
-  'b', 'e', // BEgin
-  't', 'h', // THen
-  'p', 'l', // PLus
-  'p', 'n', // Print Number
-  's', 't', // Stop
-};
-
-// Control Characters
-enum ControlEnum { ccLF = FIRST_CC, ccBS, };
-
-#define SS 16 // Stack Size
 int Globals[10];
 byte Dp;
 int Ds[SS];  // Data stack & stack pointer
@@ -61,9 +14,13 @@ byte Rp;
 int Rs[SS];  // Return stack & stack pointer
 int Pc;
 
+byte Bp;
+byte Buf[BS];        // Input buffer.
+byte Progs[10][BS];  // Program storage.
+
 void Push(int x) {
   --Dp;
-  if (Dp >= SS) Panic("Push Overflow", Dp);
+  if (Dp < 0) Panic("Push Overflow", Dp);
   Ds[Dp] = x;
 }
 int Pop() {
@@ -76,7 +33,7 @@ int Pop() {
 
 void RPush(int x) {
   --Rp;
-  if (Rp >= SS) Panic("RPush Overflow", Rp);
+  if (Rp < 0) Panic("RPush Overflow", Rp);
   Rs[Rp] = x;
 }
 int RPop() {
@@ -87,12 +44,6 @@ int RPop() {
   return z;
 }
 
-
-#define BS 50 // Buffer Size
-byte Bp;
-byte Buf[BS];        // Input buffer.
-byte Progs[10][BS];  // Program storage.
-
 void BufAdd(byte b) {
   Buf[Bp++] = b;
   if (Bp>=BS) Panic("input buffer overflow", Bp);
@@ -100,10 +51,30 @@ void BufAdd(byte b) {
 
 void DoGet(byte a) { Push(Globals[a]); }
 void DoPut(byte a) { int b = Pop(); Globals[a] = b; }
-void DoDef(byte a) { Panic("TODO Def", a); }
-void DoCall(byte a) { Panic("TODO Call", a); }
 void DoNum(byte a) { Push(a); }
 void DoMore(byte a) { int b = Pop(); Push(b*10+a); }
+void DoCall(byte a) {
+  RPush(Pc);
+  Pc = BS*(a+1);
+  printf("DoCall << arg=%d pc=%d\n", a, Pc);
+}
+void DoDef(byte a) {
+  byte* p = &Progs[a][0];
+  while (true) {
+    byte x = GetOp(Pc++);
+    if (x == t_st) { // if STOP
+      *p++ = t_ex;   // append EXIT
+      break;
+    } else {
+      *p++ = x;  // copy the opcode.
+      if (FIRST_BI <= x && x < FIRST_BI_NO_OPERAND) {
+        // also copy the arg.
+        byte arg = GetOp(Pc++);
+        *p++ = arg;
+      }
+    }
+  }
+}
 
 byte GetOp(int pc) {
   if (pc<0 || pc>=11*BS) Panic("Bad pc", pc);
@@ -115,64 +86,74 @@ byte GetOp(int pc) {
   return Progs[prog][offset];
 }
 
-bool Stop;
-
 void Dump() {
-  return;
+  //return;
   printf("\n\nDp=%d [", Dp);
-  for (int i = 0; i < SS; i++) printf("%d ", Ds[i]);
+  for (int i = Dp; i < SS; i++) printf("%d ", Ds[i]);
   printf("] \nRp=%d [", Rp);
-  for (int i = 0; i < SS; i++) printf("%d ", Rs[i]);
+  for (int i = Rp; i < SS; i++) printf("%d ", Rs[i]);
   printf("]\n Buf:");
   for (int i = 0; i < BS; i++) printf("%d ", Buf[i]);
-  printf("\nStop: %d\n\n", Stop);
+  printf("\n");
+  printf("\n");
 }
 
-void Step() {
-  byte code = GetOp(Pc++);
+bool Step() {
+  int old_pc = Pc++;
+  byte code = GetOp(old_pc);
+  printf(" (Step[Pc=%d]=%d) ", old_pc, code);
   if (Pc%BS == 0) Panic("Pc overflow", Pc);
-
-  printf(" (Step[%d]=%d) ", Pc-1, code);
 
   // Numbered Ops:
   if (code < FIRST_CC) {
     int arg = code % 10;
     switch (code/10) {
-      case nGet: DoGet(arg); return;
-      case nPut: DoPut(arg); return;
-      case nDef: DoDef(arg); return;
-      case nCall: DoCall(arg); return;
-      case nNum: DoNum(arg); return;
-      case nMore: DoMore(arg); return;
-      default: Panic("bad numbered op", code); return;
+      case nGet: DoGet(arg); break;
+      case nPut: DoPut(arg); break;
+      case nDef: DoDef(arg); return false;
+      case nCall: DoCall(arg); break;
+      case nNum: DoNum(arg); break;
+      case nMore: DoMore(arg); break;
+      default: Panic("bad numbered op", code); break;
     }
-  }
+  } else switch (code) {
   // Bigraph Ops:
-  switch (code) {
-    case bPl: {
+    case t_pl: {
                 int b=Pop(); int a=Pop(); Push(a+b);
-              } return;
-    case bPn: {
-                int b=Pop(); printf("<%d> ", b);
-              } return;
-    case bSt: {
-                Stop = true;
-              } return;
-    default: Panic("bad bigraph op", code); return;
+              } break;
+    case t_pr: {
+                int b=Pop(); printf(" <<<<< %d >>>>> ", b);
+              } break;
+    case t_st: {  // stop (stop reading buffer)
+                return false;
+              } break;
+    case t_by: { // bye
+                 fflush(stdout);
+                 fflush(stderr);
+                 fprintf(stderr, " *BYE* \n");
+                exit(0);
+              } break;
+    case t_ex: { // exit (like return in most languages)
+                Pc = RPop();
+              } break;
+    default: Panic("bad bigraph op", code);
   }
+  return true;
 }
 
-void onInput(byte code) {
+void OnInput(byte code) {
   // Control Codes:
   switch (code) {
     case ccLF: {
-                 BufAdd(bSt);
-                 Stop = false;
+                 // execute directly from input buffer.
+                 BufAdd(t_st);  // append a stop op.
                  Pc = 0;
-                 do {
-                   Step();
-                   Dump();
-                 } while (!Stop);
+                 bool ok = true;
+                 while (ok) {
+                   ok = Step();
+                 }
+                 memset(Buf, 0, sizeof Buf);
+                 Bp = 0;
                }; return;
     case ccBS: {
                  if (Bp>0) {Buf[Bp--] = 255;}
@@ -186,6 +167,12 @@ void onInput(byte code) {
   }
 }
 
+int Panic(const char* msg, int num) {
+  fprintf(stderr, "\n****** PANIC: ``%s'' (%d)\n", msg, num);
+  assert(0);
+  return 0;
+}
+
 void Reset() {
   Pc = 0;
   Bp = 0;
@@ -195,22 +182,30 @@ void Reset() {
     Ds[i] = -99; Rs[i] = -99;
   }
   for (int i = 0; i < BS; i++) {
-    Buf[i] = 252;
-    for (int j = 0; j<10; j++) Progs[j][i] = 252;
+    Buf[i] = 0;
+    for (int j = 0; j<10; j++) Progs[j][i] = 0;
   }
 }
 
 int main(int argc, char *argv[]) {
   Reset();
-  onInput(nNum*10 + 3);
+  OnInput(nNum*10 + 3);
   Dump();
-  onInput(nNum*10 + 5);
+  OnInput(nNum*10 + 5);
   Dump();
-  onInput(bPl);
+  OnInput(t_pl);
   Dump();
-  onInput(bPn);
+  OnInput(t_pr);
   Dump();
-  onInput(ccLF);
+  OnInput(ccLF);
   Dump();
+
+
+  while (true) {
+    bool ok = UnixInput();
+    if (!ok) break;
+    Dump();
+  }
+
   printf("*END*\n");
 }
